@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-comfyui",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "n8n node to integrate with ComfyUI stable diffusion workflows",
   "keywords": [
     "n8n-community-node-package",

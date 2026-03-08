@@ -134,15 +134,48 @@ export class Comfyui implements INodeType {
 			const promptId = response.prompt_id;
 			console.log('[ComfyUI] Prompt queued with ID:', promptId);
 
+			// Helper function to check if prompt is in queue
+			const isInQueue = (queue: any[][], promptId: string): boolean => {
+				for (const item of queue) {
+					// Queue items are arrays where the second element (index 1) is the prompt ID
+					if (item.length > 1 && item[1] === promptId) {
+						return true;
+					}
+				}
+				return false;
+			};
+
 			// Poll for completion
 			let attempts = 0;
 			const maxAttempts = 60 * timeout; // Convert minutes to seconds
 			await new Promise(resolve => setTimeout(resolve, 5000));
 			while (attempts < maxAttempts) {
 				console.log(`[ComfyUI] Checking execution status (attempt ${attempts + 1}/${maxAttempts})...`);
-				await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 seconds
+				await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
 				attempts++;
 
+				// First check if prompt is in the queue
+				const queueStatus = await this.helpers.request({
+					method: 'GET',
+					url: `${apiUrl}/queue`,
+					headers,
+					json: true,
+				});
+
+				const isRunning = isInQueue(queueStatus.queue_running || [], promptId);
+				const isPending = isInQueue(queueStatus.queue_pending || [], promptId);
+
+				if (isRunning) {
+					console.log('[ComfyUI] Prompt is currently running');
+					continue;
+				}
+				if (isPending) {
+					console.log('[ComfyUI] Prompt is pending in queue');
+					continue;
+				}
+
+				// Prompt is no longer in queue, check history
+				console.log('[ComfyUI] Prompt has left the queue, checking history...');
 				const history = await this.helpers.request({
 					method: 'GET',
 					url: `${apiUrl}/history/${promptId}`,
@@ -152,20 +185,31 @@ export class Comfyui implements INodeType {
 
 				const promptResult = history[promptId];
 				if (!promptResult) {
-					console.log('[ComfyUI] Prompt not found in history');
-					continue;
+					throw new NodeApiError(this.getNode(), {
+						message: '[ComfyUI] Workflow execution failed: prompt disappeared from queue but is not in history. This usually indicates a server crash or prompt parsing error.'
+					});
 				}
 
-				if (promptResult.status === undefined) {
-					console.log('[ComfyUI] Execution status not found');
-					continue;
-				}
-				if (promptResult.status?.completed) {
-					console.log('[ComfyUI] Execution completed');
+			if (promptResult.status === undefined) {
+				throw new NodeApiError(this.getNode(), { message: '[ComfyUI] Workflow execution failed: prompt contains no status' });
+			}
 
-					if (promptResult.status?.status_str === 'error') {
-						throw new NodeApiError(this.getNode(), { message: '[ComfyUI] Workflow execution failed' });
-					}
+			// Check for errors regardless of completion status
+			if (promptResult.status?.status_str === 'error') {
+				const errorMessages = promptResult.status?.messages || [];
+				const executionError = errorMessages.find((msg: any) => msg[0] === 'execution_error');
+				let errorDetails = '[ComfyUI] Workflow execution failed';
+
+				if (executionError && executionError[1]) {
+					const errorInfo = executionError[1];
+					errorDetails = `[ComfyUI] Workflow execution failed in node ${errorInfo.node_id} (${errorInfo.node_type}): ${errorInfo.exception_message}`;
+				}
+
+				throw new NodeApiError(this.getNode(), { message: errorDetails });
+			}
+
+			if (promptResult.status?.completed) {
+				console.log('[ComfyUI] Execution completed');
 
 					// Process outputs
 					if (!promptResult.outputs) {
