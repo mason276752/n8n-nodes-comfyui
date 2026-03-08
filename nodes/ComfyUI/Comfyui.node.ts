@@ -5,7 +5,7 @@ import {
 	INodeTypeDescription,
 } from 'n8n-workflow';
 import { NodeApiError } from 'n8n-workflow';
-import { Jimp } from 'jimp';
+import sharp from 'sharp';
 
 export class Comfyui implements INodeType {
 	description: INodeTypeDescription = {
@@ -51,9 +51,17 @@ export class Comfyui implements INodeType {
 						name: 'PNG',
 						value: 'png',
 					},
+					{
+						name: 'WebP',
+						value: 'webp',
+					},
+					{
+						name: 'Raw (Original)',
+						value: 'raw',
+					},
 				],
 				default: 'jpeg',
-				description: 'The format of the output images',
+				description: 'The format of the output images. Raw downloads files as-is without conversion.',
 			},
 			{
 				displayName: 'JPEG Quality',
@@ -72,6 +80,22 @@ export class Comfyui implements INodeType {
 				},
 			},
 			{
+				displayName: 'WebP Quality',
+				name: 'webpQuality',
+				type: 'number',
+				typeOptions: {
+					minValue: 1,
+					maxValue: 100
+				},
+				default: 80,
+				description: 'Quality of WebP output (1-100)',
+				displayOptions: {
+					show: {
+						outputFormat: ['webp'],
+					},
+				},
+			},
+			{
 				displayName: 'Timeout',
 				name: 'timeout',
 				type: 'number',
@@ -83,13 +107,7 @@ export class Comfyui implements INodeType {
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const credentials = await this.getCredentials('comfyUIApi');
-		const workflow = this.getNodeParameter('workflow', 0) as string;
-		const timeout = this.getNodeParameter('timeout', 0) as number;
-		const outputFormat = this.getNodeParameter('outputFormat', 0) as string;
-		let jpegQuality: number
-		if (outputFormat === 'jpeg') {
-			jpegQuality = this.getNodeParameter('jpegQuality', 0) as number;
-		}
+		const items = this.getInputData();
 
 		const apiUrl = credentials.apiUrl as string;
 		const apiKey = credentials.apiKey as string;
@@ -105,8 +123,19 @@ export class Comfyui implements INodeType {
 			headers['Authorization'] = `Bearer ${apiKey}`;
 		}
 
+		// Helper function to check if prompt is in queue
+		const isInQueue = (queue: any[][], promptId: string): boolean => {
+			// Queue items are arrays where the second element (index 1) is the prompt ID
+			for (const item of queue) {
+				if (item.length > 1 && item[1] === promptId) {
+					return true;
+				}
+			}
+			return false;
+		};
+
 		try {
-			// Check API connection
+			// Check API connection once
 			console.log('[ComfyUI] Checking API connection...');
 			await this.helpers.request({
 				method: 'GET',
@@ -115,170 +144,213 @@ export class Comfyui implements INodeType {
 				json: true,
 			});
 
-			// Queue prompt
-			console.log('[ComfyUI] Queueing prompt...');
-			const response = await this.helpers.request({
-				method: 'POST',
-				url: `${apiUrl}/prompt`,
-				headers,
-				body: {
-					prompt: JSON.parse(workflow),
-				},
-				json: true,
-			});
+			const allOutputs: INodeExecutionData[] = [];
 
-			if (!response.prompt_id) {
-				throw new NodeApiError(this.getNode(), { message: 'Failed to get prompt ID from ComfyUI' });
-			}
-
-			const promptId = response.prompt_id;
-			console.log('[ComfyUI] Prompt queued with ID:', promptId);
-
-			// Helper function to check if prompt is in queue
-			const isInQueue = (queue: any[][], promptId: string): boolean => {
-				for (const item of queue) {
-					// Queue items are arrays where the second element (index 1) is the prompt ID
-					if (item.length > 1 && item[1] === promptId) {
-						return true;
-					}
+			for (let i = 0; i < items.length; i++) {
+				const workflow = this.getNodeParameter('workflow', i) as string;
+				const timeout = this.getNodeParameter('timeout', i) as number;
+				const outputFormat = this.getNodeParameter('outputFormat', i) as string;
+				let jpegQuality: number;
+				if (outputFormat === 'jpeg') {
+					jpegQuality = this.getNodeParameter('jpegQuality', i) as number;
 				}
-				return false;
-			};
+				let webpQuality: number;
+				if (outputFormat === 'webp') {
+					webpQuality = this.getNodeParameter('webpQuality', i) as number;
+				}
 
-			// Poll for completion
-			let attempts = 0;
-			const maxAttempts = 60 * timeout; // Convert minutes to seconds
-			await new Promise(resolve => setTimeout(resolve, 5000));
-			while (attempts < maxAttempts) {
-				console.log(`[ComfyUI] Checking execution status (attempt ${attempts + 1}/${maxAttempts})...`);
-				await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-				attempts++;
+				// Queue prompt
+				console.log(`[ComfyUI] Queueing prompt for item ${i}...`);
+				const response = await this.helpers.request({
+					method: 'POST',
+					url: `${apiUrl}/prompt`,
+					headers,
+					body: {
+						prompt: JSON.parse(workflow),
+					},
+					json: true,
+				});
+
+				if (!response.prompt_id) {
+					throw new NodeApiError(this.getNode(), { message: 'Failed to get prompt ID from ComfyUI' });
+				}
+
+				const promptId = response.prompt_id;
+				console.log('[ComfyUI] Prompt queued with ID:', promptId);
+
+				// Poll for completion
+				let attempts = 0;
+				const maxAttempts = 60 * timeout; // Convert minutes to seconds
+				await new Promise(resolve => setTimeout(resolve, 5000));
+				let completed = false;
+				while (attempts < maxAttempts) {
+					console.log(`[ComfyUI] Checking execution status (attempt ${attempts + 1}/${maxAttempts})...`);
+					await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+					attempts++;
 
 				// First check if prompt is in the queue
-				const queueStatus = await this.helpers.request({
-					method: 'GET',
-					url: `${apiUrl}/queue`,
-					headers,
-					json: true,
-				});
-
-				const isRunning = isInQueue(queueStatus.queue_running || [], promptId);
-				const isPending = isInQueue(queueStatus.queue_pending || [], promptId);
-
-				if (isRunning) {
-					console.log('[ComfyUI] Prompt is currently running');
-					continue;
-				}
-				if (isPending) {
-					console.log('[ComfyUI] Prompt is pending in queue');
-					continue;
-				}
-
-				// Prompt is no longer in queue, check history
-				console.log('[ComfyUI] Prompt has left the queue, checking history...');
-				const history = await this.helpers.request({
-					method: 'GET',
-					url: `${apiUrl}/history/${promptId}`,
-					headers,
-					json: true,
-				});
-
-				const promptResult = history[promptId];
-				if (!promptResult) {
-					throw new NodeApiError(this.getNode(), {
-						message: '[ComfyUI] Workflow execution failed: prompt disappeared from queue but is not in history. This usually indicates a server crash or prompt parsing error.'
+					const queueStatus = await this.helpers.request({
+						method: 'GET',
+						url: `${apiUrl}/queue`,
+						headers,
+						json: true,
 					});
-				}
 
-			if (promptResult.status === undefined) {
-				throw new NodeApiError(this.getNode(), { message: '[ComfyUI] Workflow execution failed: prompt contains no status' });
-			}
+					const isRunning = isInQueue(queueStatus.queue_running || [], promptId);
+					const isPending = isInQueue(queueStatus.queue_pending || [], promptId);
 
-			// Check for errors regardless of completion status
-			if (promptResult.status?.status_str === 'error') {
-				const errorMessages = promptResult.status?.messages || [];
-				const executionError = errorMessages.find((msg: any) => msg[0] === 'execution_error');
-				let errorDetails = '[ComfyUI] Workflow execution failed';
-
-				if (executionError && executionError[1]) {
-					const errorInfo = executionError[1];
-					errorDetails = `[ComfyUI] Workflow execution failed in node ${errorInfo.node_id} (${errorInfo.node_type}): ${errorInfo.exception_message}`;
-				}
-
-				throw new NodeApiError(this.getNode(), { message: errorDetails });
-			}
-
-			if (promptResult.status?.completed) {
-				console.log('[ComfyUI] Execution completed');
-
-					// Process outputs
-					if (!promptResult.outputs) {
-						throw new NodeApiError(this.getNode(), { message: '[ComfyUI] No outputs found in workflow result' });
+					if (isRunning) {
+						console.log('[ComfyUI] Prompt is currently running');
+						continue;
+					}
+					if (isPending) {
+						console.log('[ComfyUI] Prompt is pending in queue');
+						continue;
 					}
 
-					// Get all image outputs
-					const outputs = await Promise.all(
-						Object.values(promptResult.outputs)
+				// Prompt is no longer in queue, check history
+					console.log('[ComfyUI] Prompt has left the queue, checking history...');
+					const history = await this.helpers.request({
+						method: 'GET',
+						url: `${apiUrl}/history/${promptId}`,
+						headers,
+						json: true,
+					});
+
+					const promptResult = history[promptId];
+					if (!promptResult) {
+						throw new NodeApiError(this.getNode(), {
+							message: '[ComfyUI] Workflow execution failed: prompt disappeared from queue but is not in history. This usually indicates a server crash or prompt parsing error.'
+						});
+					}
+
+					if (promptResult.status === undefined) {
+						throw new NodeApiError(this.getNode(), { message: '[ComfyUI] Workflow execution failed: prompt contains no status' });
+					}
+
+			// Check for errors regardless of completion status
+					if (promptResult.status?.status_str === 'error') {
+						const errorMessages = promptResult.status?.messages || [];
+						const executionError = errorMessages.find((msg: any) => msg[0] === 'execution_error');
+						let errorDetails = '[ComfyUI] Workflow execution failed';
+
+						if (executionError && executionError[1]) {
+							const errorInfo = executionError[1];
+							errorDetails = `[ComfyUI] Workflow execution failed in node ${errorInfo.node_id} (${errorInfo.node_type}): ${errorInfo.exception_message}`;
+						}
+
+						throw new NodeApiError(this.getNode(), { message: errorDetails });
+					}
+
+					if (promptResult.status?.completed) {
+						console.log('[ComfyUI] Execution completed');
+
+					// Process outputs
+						if (!promptResult.outputs) {
+							throw new NodeApiError(this.getNode(), { message: '[ComfyUI] No outputs found in workflow result' });
+						}
+
+					// Get all image and video outputs
+						const nodeOutputValues = Object.values(promptResult.outputs);
+
+						const imageFiles: any[] = nodeOutputValues
 							.flatMap((nodeOutput: any) => nodeOutput.images || [])
-							.filter((image: any) => image.type === 'output' || image.type === 'temp')
-							.map(async (file: any) => {
-								console.log(`[ComfyUI] Downloading ${file.type} image:`, file.filename);
-								let imageUrl = `${apiUrl}/view?filename=${file.filename}&subfolder=${file.subfolder || ''}&type=${file.type || ''}`;
+							.filter((f: any) => f.type === 'output' || f.type === 'temp');
 
+						const videoFiles: any[] = nodeOutputValues
+							.flatMap((nodeOutput: any) => nodeOutput.videos || [])
+							.filter((f: any) => f.type === 'output' || f.type === 'temp');
 
+						const VIDEO_MIME: Record<string, string> = {
+							mp4: 'video/mp4',
+							webm: 'video/webm',
+							mov: 'video/quicktime',
+							avi: 'video/x-msvideo',
+							gif: 'image/gif',
+						};
+
+						const outputs = await Promise.all([
+							...imageFiles.map(async (file: any) => {
+								console.log(`[ComfyUI] Downloading image:`, file.filename);
+								const fileUrl = `${apiUrl}/view?filename=${file.filename}&subfolder=${file.subfolder || ''}&type=${file.type || ''}`;
 								try {
-									const imageData = await this.helpers.request({
-										method: 'GET',
-										url: imageUrl,
-										encoding: null,
-										headers,
-									});
-									const image = await Jimp.read(Buffer.from(imageData, 'base64'));
+									const rawData = await this.helpers.request({ method: 'GET', url: fileUrl, encoding: null, headers });
 									let outputBuffer: Buffer;
-									if (outputFormat === 'jpeg') {
-										outputBuffer = await image.getBuffer("image/jpeg", { quality: jpegQuality });
+									let fileExtension: string;
+									let mimeType: string;
+									if (outputFormat === 'raw') {
+										outputBuffer = Buffer.from(rawData, 'base64');
+										fileExtension = file.filename.split('.').pop()?.toLowerCase() || 'png';
+										mimeType = `image/${fileExtension}`;
 									} else {
-										outputBuffer = await image.getBuffer(`image/png`);
+										const imageInput = sharp(Buffer.from(rawData, 'base64'));
+										if (outputFormat === 'jpeg') {
+											outputBuffer = await imageInput.jpeg({ quality: jpegQuality }).toBuffer();
+										} else if (outputFormat === 'webp') {
+											outputBuffer = await imageInput.webp({ quality: webpQuality }).toBuffer();
+										} else {
+											outputBuffer = await imageInput.png().toBuffer();
+										}
+										fileExtension = outputFormat;
+										mimeType = `image/${outputFormat}`;
 									}
 									const outputBase64 = outputBuffer.toString('base64');
-									const item: INodeExecutionData = {
-										json: {
-											filename: file.filename,
-											type: file.type,
-											subfolder: file.subfolder || '',
+									return {
+										json: { filename: file.filename, type: file.type, subfolder: file.subfolder || '', mediaType: 'image' },
+										binary: { data: {
+											fileName: file.filename,
 											data: outputBase64,
-										},
-										binary: {
-											data: {
-												fileName: file.filename,
-												data: outputBase64,
-												fileType: 'image',
-												fileSize: Math.round(outputBuffer.length / 1024 * 10) / 10 + " kB",
-												fileExtension: outputFormat,
-												mimeType: `image/${outputFormat}`,
-											}
-										}
-									};
-									return item
+											fileType: 'image',
+											fileSize: Math.round(outputBuffer.length / 1024 * 10) / 10 + " kB",
+											fileExtension,
+											mimeType,
+										} }
+									} as INodeExecutionData;
 								} catch (error) {
 									console.error(`[ComfyUI] Failed to download image ${file.filename}:`, error);
-									return {
-										json: {
-											filename: file.filename,
-											type: file.type,
-											subfolder: file.subfolder || '',
-											error: error.message,
-										},
-									};
+									return { json: { filename: file.filename, type: file.type, subfolder: file.subfolder || '', error: error.message } };
 								}
-							})
-					);
+							}),
+							...videoFiles.map(async (file: any) => {
+								console.log(`[ComfyUI] Downloading video:`, file.filename);
+								const ext = file.filename.split('.').pop()?.toLowerCase() || 'mp4';
+								const mimeType = file.format || VIDEO_MIME[ext] || `video/${ext}`;
+								const fileUrl = `${apiUrl}/view?filename=${file.filename}&subfolder=${file.subfolder || ''}&type=${file.type || ''}`;
+								try {
+									const rawData = await this.helpers.request({ method: 'GET', url: fileUrl, encoding: null, headers });
+									const outputBuffer = Buffer.from(rawData, 'base64');
+									const outputBase64 = outputBuffer.toString('base64');
+									return {
+										json: { filename: file.filename, type: file.type, subfolder: file.subfolder || '', mediaType: 'video' },
+										binary: { data: {
+											fileName: file.filename,
+											data: outputBase64,
+											fileType: 'video',
+											fileSize: Math.round(outputBuffer.length / 1024 * 10) / 10 + " kB",
+											fileExtension: ext,
+											mimeType,
+										} }
+									} as INodeExecutionData;
+								} catch (error) {
+									console.error(`[ComfyUI] Failed to download video ${file.filename}:`, error);
+									return { json: { filename: file.filename, type: file.type, subfolder: file.subfolder || '', error: error.message } };
+								}
+							}),
+						]);
 
-					console.log('[ComfyUI] All images downloaded successfully');
-					return [outputs];
+						console.log(`[ComfyUI] All images downloaded for item ${i}`);
+						allOutputs.push(...outputs);
+						completed = true;
+						break;
+					}
+				}
+
+				if (!completed) {
+					throw new NodeApiError(this.getNode(), { message: `Execution timeout after ${timeout} minutes` });
 				}
 			}
-			throw new NodeApiError(this.getNode(), { message: `Execution timeout after ${timeout} minutes` });
+
+			return [allOutputs];
 		} catch (error) {
 			console.error('[ComfyUI] Execution error:', error);
 			throw new NodeApiError(this.getNode(), { message: `ComfyUI API Error: ${error.message}` });

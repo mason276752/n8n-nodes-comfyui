@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-comfyui",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "n8n node to integrate with ComfyUI stable diffusion workflows",
   "keywords": [
     "n8n-community-node-package",
@@ -18,10 +18,10 @@
     "url": "https://github.com/mason276752/n8n-nodes-comfyui.git"
   },
   "engines": {
-    "node": ">=18.10",
-    "pnpm": ">=9.1"
+    "node": ">=22.16",
+    "pnpm": ">=10.22.0"
   },
-  "packageManager": "pnpm@9.1.4",
+  "packageManager": "pnpm@10.22.0",
   "main": "index.js",
   "scripts": {
     "preinstall": "npx only-allow pnpm",
@@ -45,6 +45,7 @@
     ]
   },
   "devDependencies": {
+    "@types/node": "^25.3.5",
     "@typescript-eslint/parser": "^7.15.0",
     "eslint": "^8.56.0",
     "eslint-plugin-n8n-nodes-base": "^1.16.1",
@@ -57,6 +58,6 @@
     "n8n-workflow": "*"
   },
   "dependencies": {
-    "jimp": "^1.6.0"
+    "sharp": "^0.34.5"
   }
 }
