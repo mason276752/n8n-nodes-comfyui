@@ -2,82 +2,107 @@
 
 # n8n-nodes-comfyui
 
-This package provides n8n nodes to integrate with [ComfyUI](https://github.com/comfyanonymous/ComfyUI) - A powerful and modular stable diffusion GUI with a graph/nodes interface.
+This package provides an n8n node to integrate with [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — a powerful and modular stable diffusion GUI with a graph/nodes interface.
 
 ## Features
 
 - Execute ComfyUI workflows directly from n8n
-- Support for workflow JSON import
-- Automatic image retrieval from workflow outputs
+- Support for multiple input items (each item runs its own workflow)
+- Automatic retrieval of generated images **and videos**
+- Output format conversion: JPEG, PNG, WebP, or Raw (no conversion)
+- Quality control for JPEG and WebP output
 - Progress monitoring and error handling
-- Support for API key authentication
-- Configurable timeout settings
+- Optional API key authentication
+- Configurable timeout
 
 ## Prerequisites
 
 - n8n (version 1.0.0 or later)
 - ComfyUI instance running and accessible
-- Node.js 16 or newer
+- Node.js 22.16 or newer
 
 ## Installation
 
 ```bash
-npm install n8n-nodes-comfyui
+pnpm install n8n-nodes-comfyui
 ```
+
+Or via the n8n community nodes panel: search for `n8n-nodes-comfyui`.
 
 ## Node Configuration
 
-### ComfyUI Node
+### Credentials
 
-This node allows you to execute ComfyUI workflows and retrieve generated images.
+| Field   | Description                                              |
+|---------|----------------------------------------------------------|
+| API URL | URL of your ComfyUI instance (e.g. `http://127.0.0.1:8188`) |
+| API Key | Optional — required if your ComfyUI has authentication enabled |
 
-#### Settings
+### Parameters
 
-- **API URL**: The URL of your ComfyUI instance (default: http://127.0.0.1:8188)
-- **API Key**: Optional API key if authentication is enabled
-- **Workflow JSON**: The ComfyUI workflow in JSON format
+| Parameter      | Description                                                                 |
+|----------------|-----------------------------------------------------------------------------|
+| Workflow JSON  | ComfyUI workflow exported as JSON (API format)                              |
+| Output Format  | `JPEG` / `PNG` / `WebP` / `Raw (Original)` — applies to image outputs only |
+| JPEG Quality   | Quality 1–100 (shown when Output Format is JPEG)                           |
+| WebP Quality   | Quality 1–100 (shown when Output Format is WebP)                           |
+| Timeout        | Maximum minutes to wait for workflow completion (default: 30)               |
 
-#### Outputs
+### Output Format notes
 
-The node outputs an array of generated images with:
-- `filename`: Name of the generated image file
-- `subfolder`: Subfolder path if any
-- `data`: Base64 encoded image data
+- **JPEG / PNG / WebP** — images are decoded and re-encoded via [sharp](https://sharp.pixelplumbing.com/)
+- **Raw (Original)** — files are downloaded as-is without any conversion; useful for formats sharp doesn't support, or when you want to preserve the original file exactly
 
-## Usage Example
+### Outputs
 
-1. Export your workflow from ComfyUI as JSON
-2. Create a new workflow in n8n
-3. Add the ComfyUI node
-4. Paste your workflow JSON
-5. Configure the API URL
-6. Execute and retrieve generated images
+Each output item contains:
+
+**JSON fields**
+- `filename` — original filename from ComfyUI
+- `type` — `output` or `temp`
+- `subfolder` — subfolder path if any
+- `mediaType` — `image` or `video`
+
+**Binary (`data`)**
+- The file content as binary data, with correct `mimeType` and `fileExtension` set
+
+## Multiple Input Items
+
+When multiple items are passed into this node, each item is processed sequentially — one ComfyUI workflow execution per item. This allows expressions in the Workflow JSON field to reference each item's data (e.g. `{{ $json.prompt }}`).
+
+## Usage
+
+1. Export your workflow from ComfyUI via **Save (API Format)**
+2. Add the ComfyUI node to your n8n workflow
+3. Paste the workflow JSON into the **Workflow JSON** field
+4. Set the API URL in the credentials
+5. Execute — generated images and videos will appear as binary outputs
 
 ## Error Handling
 
-The node includes comprehensive error handling for:
-- API connection issues
+The node handles:
+- API connection failures
 - Invalid workflow JSON
-- Execution failures
-- Timeout conditions (default 20 minutes)
+- ComfyUI execution errors (with node ID and error message)
+- Timeout conditions
+- Individual file download failures (non-fatal; returns error in `json.error`)
 
 ## Development
 
 ```bash
 # Install dependencies
-npm install
+pnpm install
 
 # Build
-npm run build
+pnpm build
 
-# Test
-npm run test
+# Watch mode
+pnpm dev
 
 # Lint
-npm run lint
+pnpm lint
 ```
 
 ## License
 
 [MIT](LICENSE.md)
- 
